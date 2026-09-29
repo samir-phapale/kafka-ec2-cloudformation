@@ -1,0 +1,15 @@
+{
+  "Parameters": {
+    "ProjectName": "kafka-on-ec2",
+    "Environment": "dev",
+    "VpcCidr": "10.0.0.0/16",
+    "DnsZoneName": "kafka.internal",
+    "InstanceType": "t3.medium",
+    "RootVolumeSize": "30",
+    "KafkaVersion": "3.8.0",
+    "ScalaVersion": "2.13",
+    "KafkaClusterId": "xtXvUT8RTlCHw7d_k-21rA",
+    "KafkaPort": "9092",
+    "KafkaControllerPort": "9093"
+  }
+}

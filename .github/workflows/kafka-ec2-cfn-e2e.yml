@@ -1,0 +1,95 @@
+name: Kafka EC2 CloudFormation E2E
+
+on:
+  pull_request:
+    branches: [main]
+    paths-ignore: ["**.md"]
+  push:
+    branches: [main]
+    paths-ignore: ["**.md"]
+  workflow_dispatch:
+    inputs:
+      message_count:
+        description: Messages to produce and consume
+        default: "100"
+      keep_stack:
+        description: Keep the stack after the run
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  WORKING_DIR: .
+  AWS_REGION: ${{ vars.AWS_REGION }}
+
+jobs:
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: cfn-lint
+        working-directory: ${{ env.WORKING_DIR }}
+        run: |
+          pip install "cfn-lint>=1.0"
+          cfn-lint template.yaml
+
+      - name: shellcheck
+        working-directory: ${{ env.WORKING_DIR }}
+        run: shellcheck -x scripts/*.sh
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: aws cloudformation validate-template
+        working-directory: ${{ env.WORKING_DIR }}
+        run: aws cloudformation validate-template --template-body file://template.yaml
+
+  e2e:
+    name: e2e
+    needs: validate
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    concurrency:
+      group: kafka-ec2-cfn-e2e
+      cancel-in-progress: false
+    env:
+      STACK_NAME: kafka-on-ec2-cfn-dev-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 3600
+
+      - name: Run end-to-end test
+        working-directory: ${{ env.WORKING_DIR }}
+        env:
+          RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+          MESSAGE_COUNT: ${{ inputs.message_count || '100' }}
+          KEEP_STACK: ${{ inputs.keep_stack && '1' || '0' }}
+        run: bash scripts/run-e2e.sh dev
+
+      - name: Delete stack
+        if: always() && inputs.keep_stack != true
+        run: |
+          aws cloudformation delete-stack --stack-name "${STACK_NAME}"
+          aws cloudformation wait stack-delete-complete --stack-name "${STACK_NAME}"
