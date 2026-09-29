@@ -1,3 +1,4 @@
+#!/bin/bash
 set -euo pipefail
 
 NODE_ID="${1:?usage: setup-kafka.sh <node-id>}"
