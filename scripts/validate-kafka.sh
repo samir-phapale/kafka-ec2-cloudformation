@@ -1,3 +1,6 @@
+#!/bin/bash
+# shellcheck disable=SC2016,SC2034
+
 export MSYS_NO_PATHCONV=1
 export AWS_PAGER=""
 

@@ -1,9 +1,10 @@
 #!/bin/bash
+# shellcheck disable=SC2034
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-# shellcheck source=validate-kafka.sh
+# shellcheck source=scripts/validate-kafka.sh
 source "${SCRIPT_DIR}/validate-kafka.sh"
 
 ENVIRONMENT="${1:-dev}"
