@@ -1,0 +1,375 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: 3-node Kafka (KRaft) cluster on EC2 across three AZs
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Naming }
+        Parameters: [ProjectName, Environment]
+      - Label: { default: Networking }
+        Parameters: [VpcCidr, DnsZoneName]
+      - Label: { default: Brokers }
+        Parameters: [InstanceType, RootVolumeSize, LatestAmiId]
+      - Label: { default: Kafka }
+        Parameters: [KafkaVersion, ScalaVersion, KafkaClusterId, KafkaPort, KafkaControllerPort]
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: kafka-on-ec2
+    AllowedPattern: "^[a-z][a-z0-9-]{1,30}$"
+    Description: Resource name prefix. Stack name must start with this.
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, test, prod]
+
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+  DnsZoneName:
+    Type: String
+    Default: kafka.internal
+
+  InstanceType:
+    Type: String
+    Default: t3.medium
+  RootVolumeSize:
+    Type: Number
+    Default: 30
+    MinValue: 30
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+  KafkaVersion:
+    Type: String
+    Default: 3.8.0
+  ScalaVersion:
+    Type: String
+    Default: "2.13"
+  KafkaClusterId:
+    Type: String
+    Default: xtXvUT8RTlCHw7d_k-21rA
+    AllowedPattern: "^[A-Za-z0-9_-]{22}$"
+  KafkaPort:
+    Type: Number
+    Default: 9092
+  KafkaControllerPort:
+    Type: Number
+    Default: 9093
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-vpc" }
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-igw" }
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [0, !Cidr [!Ref VpcCidr, 4, 8]]
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-public" }
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [1, !Cidr [!Ref VpcCidr, 4, 8]]
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-private-a" }
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [2, !Cidr [!Ref VpcCidr, 4, 8]]
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-private-b" }
+
+  PrivateSubnetC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [3, !Cidr [!Ref VpcCidr, 4, 8]]
+      AvailabilityZone: !Select [2, !GetAZs ""]
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-private-c" }
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-public-rt" }
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  NatEip:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-nat-eip" }
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEip.AllocationId
+      SubnetId: !Ref PublicSubnet
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-nat" }
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-private-rt" }
+
+  PrivateDefaultRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetCRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetC
+      RouteTableId: !Ref PrivateRouteTable
+
+  KafkaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Kafka brokers
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-kafka-sg" }
+
+  KafkaBrokerIngressFromSelf:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref KafkaSecurityGroup
+      SourceSecurityGroupId: !Ref KafkaSecurityGroup
+      IpProtocol: tcp
+      FromPort: !Ref KafkaPort
+      ToPort: !Ref KafkaPort
+
+  KafkaControllerIngressFromSelf:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref KafkaSecurityGroup
+      SourceSecurityGroupId: !Ref KafkaSecurityGroup
+      IpProtocol: tcp
+      FromPort: !Ref KafkaControllerPort
+      ToPort: !Ref KafkaControllerPort
+
+  KafkaEgressToSelf:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref KafkaSecurityGroup
+      DestinationSecurityGroupId: !Ref KafkaSecurityGroup
+      IpProtocol: tcp
+      FromPort: !Ref KafkaPort
+      ToPort: !Ref KafkaControllerPort
+
+  KafkaInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-broker-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+
+  KafkaInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "${AWS::StackName}-broker-profile"
+      Roles: [!Ref KafkaInstanceRole]
+
+  KafkaLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        MetadataOptions:
+          HttpTokens: required
+          HttpEndpoint: enabled
+          HttpPutResponseHopLimit: 1
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: !Ref RootVolumeSize
+              VolumeType: gp3
+              Encrypted: true
+              DeleteOnTermination: true
+
+  Broker0:
+    Type: AWS::EC2::Instance
+    DependsOn: [PrivateDefaultRoute, PrivateSubnetARouteTableAssociation]
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref PrivateSubnetA
+      SecurityGroupIds: [!Ref KafkaSecurityGroup]
+      IamInstanceProfile: !Ref KafkaInstanceProfile
+      LaunchTemplate:
+        LaunchTemplateId: !Ref KafkaLaunchTemplate
+        Version: !GetAtt KafkaLaunchTemplate.LatestVersionNumber
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-broker-0" }
+        - { Key: KafkaNodeId, Value: "0" }
+        - { Key: Project, Value: !Ref ProjectName }
+        - { Key: Environment, Value: !Ref Environment }
+
+  Broker1:
+    Type: AWS::EC2::Instance
+    DependsOn: [PrivateDefaultRoute, PrivateSubnetBRouteTableAssociation]
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref PrivateSubnetB
+      SecurityGroupIds: [!Ref KafkaSecurityGroup]
+      IamInstanceProfile: !Ref KafkaInstanceProfile
+      LaunchTemplate:
+        LaunchTemplateId: !Ref KafkaLaunchTemplate
+        Version: !GetAtt KafkaLaunchTemplate.LatestVersionNumber
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-broker-1" }
+        - { Key: KafkaNodeId, Value: "1" }
+        - { Key: Project, Value: !Ref ProjectName }
+        - { Key: Environment, Value: !Ref Environment }
+
+  Broker2:
+    Type: AWS::EC2::Instance
+    DependsOn: [PrivateDefaultRoute, PrivateSubnetCRouteTableAssociation]
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref PrivateSubnetC
+      SecurityGroupIds: [!Ref KafkaSecurityGroup]
+      IamInstanceProfile: !Ref KafkaInstanceProfile
+      LaunchTemplate:
+        LaunchTemplateId: !Ref KafkaLaunchTemplate
+        Version: !GetAtt KafkaLaunchTemplate.LatestVersionNumber
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-broker-2" }
+        - { Key: KafkaNodeId, Value: "2" }
+        - { Key: Project, Value: !Ref ProjectName }
+        - { Key: Environment, Value: !Ref Environment }
+
+  PrivateHostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Ref DnsZoneName
+      VPCs:
+        - VPCId: !Ref Vpc
+          VPCRegion: !Ref AWS::Region
+
+  Broker0Record:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref PrivateHostedZone
+      Name: !Sub "broker-0.${DnsZoneName}."
+      Type: A
+      TTL: "60"
+      ResourceRecords: [!GetAtt Broker0.PrivateIp]
+
+  Broker1Record:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref PrivateHostedZone
+      Name: !Sub "broker-1.${DnsZoneName}."
+      Type: A
+      TTL: "60"
+      ResourceRecords: [!GetAtt Broker1.PrivateIp]
+
+  Broker2Record:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref PrivateHostedZone
+      Name: !Sub "broker-2.${DnsZoneName}."
+      Type: A
+      TTL: "60"
+      ResourceRecords: [!GetAtt Broker2.PrivateIp]
+
+Outputs:
+  VpcId:
+    Value: !Ref Vpc
+  BrokerInstanceIds:
+    Value: !Join [",", [!Ref Broker0, !Ref Broker1, !Ref Broker2]]
+  BootstrapServers:
+    Value: !Sub "broker-0.${DnsZoneName}:${KafkaPort},broker-1.${DnsZoneName}:${KafkaPort},broker-2.${DnsZoneName}:${KafkaPort}"
+  QuorumVoters:
+    Value: !Sub "0@broker-0.${DnsZoneName}:${KafkaControllerPort},1@broker-1.${DnsZoneName}:${KafkaControllerPort},2@broker-2.${DnsZoneName}:${KafkaControllerPort}"
+  DnsZoneName:
+    Value: !Ref DnsZoneName
+  KafkaVersion:
+    Value: !Ref KafkaVersion
+  ScalaVersion:
+    Value: !Ref ScalaVersion
+  KafkaClusterId:
+    Value: !Ref KafkaClusterId
+  KafkaPort:
+    Value: !Ref KafkaPort
+  KafkaControllerPort:
+    Value: !Ref KafkaControllerPort
+  SsmConnectCommand:
+    Value: !Sub "aws ssm start-session --target ${Broker0} --region ${AWS::Region}"
